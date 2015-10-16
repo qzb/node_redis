@@ -10,6 +10,9 @@ var metrics = require('metrics');
 var num_clients = parseInt(process.argv[2], 10) || 5;
 var num_requests = 50000;
 var tests = [];
+// var bluebird = require('bluebird');
+// bluebird.promisifyAll(redis.RedisClient.prototype);
+// bluebird.promisifyAll(redis.Multi.prototype);
 var versions_logged = false;
 var client_options = {
         return_buffers: false,
@@ -145,11 +148,9 @@ Test.prototype.batch = function () {
     }
 
     batch.exec(function (err, res) {
-        if (err) {
-            throw err;
-        }
-        self.commands_completed += res.length;
         self.command_latency.update(Date.now() - start);
+        self.commands_completed += res.length;
+        if (err) throw err;
         self.fill_pipeline();
     });
 };
@@ -174,11 +175,9 @@ Test.prototype.send_next = function () {
         start = Date.now();
 
     this.clients[cur_client][this.args.command](this.args.args, function (err, res) {
-        if (err) {
-            throw err;
-        }
-        self.commands_completed++;
         self.command_latency.update(Date.now() - start);
+        if (err) throw err;
+        self.commands_completed++;
         self.fill_pipeline();
     });
 };

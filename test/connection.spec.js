@@ -31,13 +31,13 @@ describe("on lost connection", function () {
                         setTimeout(function () {
                             assert.strictEqual(calls, max_attempts - 1);
                             done();
-                        }, 1500);
+                        }, 500);
                     }
                 });
             });
 
             it("emit an error after max retry timeout and do not try to reconnect afterwards", function (done) {
-                var connect_timeout = 1000; // in ms
+                var connect_timeout = 500; // in ms
                 var client = redis.createClient({
                     parser: parser,
                     connect_timeout: connect_timeout
@@ -57,7 +57,7 @@ describe("on lost connection", function () {
                         setTimeout(function () {
                             assert(time === connect_timeout);
                             done();
-                        }, 1500);
+                        }, 500);
                     }
                 });
             });

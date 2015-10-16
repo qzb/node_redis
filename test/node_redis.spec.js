@@ -34,12 +34,13 @@ describe("The node_redis client", function () {
         describe("using " + parser + " and " + ip, function () {
             var client;
 
+            afterEach(function () {
+                if (client) {
+                    client.end();
+                }
+            });
+
             describe("when not connected", function () {
-                afterEach(function () {
-                    if (client) {
-                        client.end();
-                    }
-                });
 
                 it("connects correctly with args", function (done) {
                     client = redis.createClient.apply(redis.createClient, args);
@@ -130,10 +131,6 @@ describe("The node_redis client", function () {
                     });
                 });
 
-                afterEach(function () {
-                    client.end();
-                });
-
                 describe("send_command", function () {
 
                     it("omitting args should be fine in some cases", function (done) {
@@ -211,7 +208,7 @@ describe("The node_redis client", function () {
                     it("return an error in the callback", function (done) {
                         if (helper.redisProcess().spawnFailed()) this.skip();
 
-                        var client = redis.createClient();
+                        client = redis.createClient();
                         client.quit(function() {
                             client.get("foo", function(err, res) {
                                 assert(err.message.indexOf('Redis connection gone') !== -1);
@@ -224,7 +221,7 @@ describe("The node_redis client", function () {
                     it("return an error in the callback version two", function (done) {
                         if (helper.redisProcess().spawnFailed()) this.skip();
 
-                        var client = redis.createClient();
+                        client = redis.createClient();
                         client.quit();
                         setTimeout(function() {
                             client.get("foo", function(err, res) {
@@ -239,7 +236,7 @@ describe("The node_redis client", function () {
                     it("emit an error", function (done) {
                         if (helper.redisProcess().spawnFailed()) this.skip();
 
-                        var client = redis.createClient();
+                        client = redis.createClient();
                         client.quit();
                         client.on('error', function(err) {
                             assert.strictEqual(err.message, 'SET can\'t be processed. The connection has already been closed.');
@@ -435,7 +432,6 @@ describe("The node_redis client", function () {
 
             describe('socket_nodelay', function () {
                 describe('true', function () {
-                    var client;
                     var args = config.configureClient(parser, ip, {
                         socket_nodelay: true
                     });
@@ -470,7 +466,6 @@ describe("The node_redis client", function () {
                 });
 
                 describe('false', function () {
-                    var client;
                     var args = config.configureClient(parser, ip, {
                         socket_nodelay: false
                     });
@@ -505,7 +500,6 @@ describe("The node_redis client", function () {
                 });
 
                 describe('defaults to true', function () {
-                    var client;
 
                     it("fires client.on('ready')", function (done) {
                         client = redis.createClient.apply(redis.createClient, args);
@@ -538,7 +532,6 @@ describe("The node_redis client", function () {
             });
 
             describe('retry_max_delay', function () {
-                var client;
                 var args = config.configureClient(parser, ip, {
                     retry_max_delay: 1 // ms
                 });
@@ -567,7 +560,7 @@ describe("The node_redis client", function () {
             describe('enable_offline_queue', function () {
                 describe('true', function () {
                     it("does not return an error and enqueues operation", function (done) {
-                        var client = redis.createClient(9999, null, {
+                        client = redis.createClient(9999, null, {
                             max_attempts: 0,
                             parser: parser
                         });
@@ -591,8 +584,105 @@ describe("The node_redis client", function () {
                         }, 50);
                     });
 
+                    it("return an error after enqueueing operation and exceeding a timeout", function (done) {
+                        client = redis.createClient(9999, null, {
+                            enable_offline_queue: 500,
+                            parser: parser
+                        });
+
+                        client.on('error', function(err) {
+                            // ignore, b/c expecting a "can't connect" error
+                        });
+
+                        client.set('foo', 'bar', function(err, result) {
+                            assert(/could not be processed. Offline command timeout exceeded./.test(err.message));
+                            assert.strictEqual(err.command, 'SET');
+                            assert.strictEqual(client.offline_queue.length, 0);
+                            done();
+                        });
+
+                        assert.strictEqual(client.offline_queue.length, 1);
+                    });
+
+                    it("return an error after enqueueing operation and exceeding a timeout complex", function (done) {
+                        client = redis.createClient(9999, null, {
+                            enable_offline_queue: 300,
+                            parser: parser
+                        });
+
+                        client.on('error', function(err) {
+                            // ignore, b/c expecting a "can't connect" error
+                        });
+
+                        client.set('foo', 'bar', function(err, result) {
+                            assert(/could not be processed. Offline command timeout exceeded./.test(err.message));
+                            assert.strictEqual(err.command, 'SET');
+                            assert.strictEqual(client.offline_queue.length, 2);
+                        });
+
+                        setTimeout(function () {
+                            client.set('bar', 'baz');
+                            client.get('bar', function(err, result) {
+                                assert.strictEqual(result, 'baz');
+                                done();
+                            });
+                            assert.strictEqual(client.offline_queue.length, 3);
+                        }, 200);
+
+                        setTimeout(function () {
+                            client.connectionOption = {
+                                port: 6379,
+                                host: '127.0.0.1',
+                                family: 4
+                            };
+                            client.address = '127.0.0.1:6379';
+                        }, 301);
+
+                        assert.strictEqual(client.offline_queue.length, 1);
+                    });
+
+                    it("emit an error after enqueueing operation and exceeding a timeout without callback", function (done) {
+                        client = redis.createClient(9999, null, {
+                            enable_offline_queue: 500,
+                            parser: parser
+                        });
+
+                        client.on('error', function(err) {
+                            if (/could not be processed. Offline command timeout exceeded./.test(err.message)) {
+                                done();
+                            }
+                        });
+
+                        client.set('foo', 'bar');
+
+                        assert.strictEqual(client.offline_queue.length, 1);
+                    });
+
+                    it("return an error after enqueueing operation and exceeding a timeout promisified", function (done) {
+                        client = redis.createClient(9999, null, {
+                            enable_offline_queue: 500,
+                            parser: parser
+                        });
+
+                        client.on('error', function(err) {
+                            // ignore, b/c expecting a "can't connect" error
+                        });
+
+                        var promise = client.setAsync('foo', 'bar');
+
+                        assert.strictEqual(client.offline_queue.length, 1);
+
+                        return promise.then(assert, function(err) {
+                            assert(/could not be processed. Offline command timeout exceeded./.test(err.message));
+                            assert.strictEqual(err.command, 'SET');
+                            assert.strictEqual(client.offline_queue.length, 0);
+                            done();
+                            return;
+                        });
+                    });
+
                     it("enqueues operation and keep the queue while trying to reconnect", function (done) {
-                        var client = redis.createClient(9999, null, {
+                        client = redis.createClient(9999, null, {
                             max_attempts: 4,
                             parser: parser
                         });
@@ -628,7 +718,7 @@ describe("The node_redis client", function () {
 
                 describe('false', function () {
                     it("emit an error and does not enqueues operation", function (done) {
-                        var client = redis.createClient(9999, null, {
+                        client = redis.createClient(9999, null, {
                             parser: parser,
                             max_attempts: 0,
                             enable_offline_queue: false
@@ -636,7 +726,7 @@ describe("The node_redis client", function () {
                         var end = helper.callFuncAfter(done, 3);
 
                         client.on('error', function(err) {
-                            assert(/Stream not writeable|ECONNREFUSED/.test(err.message));
+                            assert(/offline queue is deactivated|ECONNREFUSED/.test(err.message));
                             assert.equal(client.command_queue.length, 0);
                             end();
                         });
@@ -653,7 +743,7 @@ describe("The node_redis client", function () {
                     });
 
                     it("flushes the command queue connection if in broken connection mode", function (done) {
-                        var client = redis.createClient({
+                        client = redis.createClient({
                             parser: parser,
                             max_attempts: 2,
                             enable_offline_queue: false

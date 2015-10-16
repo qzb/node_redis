@@ -4,7 +4,9 @@
   "description": "Redis client library",
   "keywords": [
     "database",
-    "redis"
+    "redis",
+    "transaction",
+    "pipelining"
   ],
   "author": "Matt Ranney <mjr@ranney.com>",
   "license": "MIT",
@@ -19,6 +21,9 @@
   },
   "dependencies": {
     "double-ended-queue": "^2.1.0-0"
+  },
+  "engines": {
+    "node": ">=0.10.0"
   },
   "devDependencies": {
     "coveralls": "^2.11.2",

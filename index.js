@@ -20,6 +20,8 @@ var debug = function(msg) {
     }
 };
 
+function noop () {}
+
 exports.debug_mode = /\bredis\b/i.test(process.env.NODE_DEBUG);
 
 // hiredis might not be installed
@@ -38,19 +40,18 @@ function RedisClient(stream, options) {
 
     if (!stream.cork) {
         this.pipeline = 0;
-        this.cork = function noop (len) {};
+        this.cork = noop;
         this.once('ready', function () {
             self.cork = function (len) {
                 self.pipeline = len;
                 self.pipeline_queue = new Queue(len);
             };
         });
-        stream.uncork = function noop() {};
+        stream.uncork = noop;
         this.write = this.writeStream;
     }
 
     this.stream = stream;
-    this.options = options;
     this.connection_id = ++connection_id;
     this.connected = false;
     this.ready = false;
@@ -68,12 +69,12 @@ function RedisClient(stream, options) {
             }
         }
     }
-    this.options.return_buffers = !!this.options.return_buffers;
-    this.options.detect_buffers = !!this.options.detect_buffers;
+    options.return_buffers = !!options.return_buffers;
+    options.detect_buffers = !!options.detect_buffers;
     // Override the detect_buffers setting if return_buffers is active and print a warning
-    if (this.options.return_buffers && this.options.detect_buffers) {
+    if (options.return_buffers && options.detect_buffers) {
         console.warn('>> WARNING: You activated return_buffers and detect_buffers at the same time. The return value is always going to be a buffer.');
-        this.options.detect_buffers = false;
+        options.detect_buffers = false;
     }
     this.should_buffer = false;
     this.command_queue_high_water = options.command_queue_high_water || 1000;
@@ -81,11 +82,22 @@ function RedisClient(stream, options) {
     this.max_attempts = +options.max_attempts || 0;
     this.command_queue = new Queue(); // Holds sent commands to de-pipeline them
     this.offline_queue = new Queue(); // Holds commands issued but not able to be sent
-    this.commands_sent = 0;
-    this.connect_timeout = +options.connect_timeout || 86400000; // 24 * 60 * 60 * 1000 ms
-    this.enable_offline_queue = options.enable_offline_queue === false ? false : true;
     this.retry_max_delay = +options.retry_max_delay || null;
     this.initialize_retry_vars();
+    this.connect_timeout = +options.connect_timeout || 86400000; // 24 * 60 * 60 * 1000 ms
+    if (typeof options.enable_offline_queue === 'boolean' || options.enable_offline_queue === undefined) {
+        // Backwards compatible
+        this.enable_offline_queue = options.enable_offline_queue === false ? -1 : 0;
+    } else {
+        this.enable_offline_queue = +options.enable_offline_queue;
+        if (this.enable_offline_queue > 0 && this.enable_offline_queue < this.retry_delay) {
+            console.warn(
+                '>> node_redis WARNING:\n\tYou used a lower enable_offline_queue time than the retry delay.\n\t' +
+                'This would result in all commands being rejected and therefor the timeout will be 50 milliseconds above the retry delay time instead.'
+            );
+            this.enable_offline_queue = this.retry_delay + 50;
+        }
+    }
     this.pub_sub_mode = false;
     this.subscription_set = {};
     this.monitoring = false;
@@ -95,6 +107,7 @@ function RedisClient(stream, options) {
     this.parser_module = null;
     this.selected_db = null; // Save the selected db here, used when reconnecting
     this.old_state = null;
+    this.options = options;
 
     this.install_stream_listeners();
     events.EventEmitter.call(this);
@@ -118,11 +131,11 @@ RedisClient.prototype.install_stream_listeners = function() {
         self.on_error(err);
     });
 
-    this.stream.on('close', function () {
+    this.stream.once('close', function () {
         self.connection_gone('close');
     });
 
-    this.stream.on('end', function () {
+    this.stream.once('end', function () {
         self.connection_gone('end');
     });
 
@@ -139,8 +152,8 @@ RedisClient.prototype.cork = function (len) {
 RedisClient.prototype.initialize_retry_vars = function () {
     this.retry_timer = null;
     this.retry_totaltime = 0;
-    this.retry_delay = 200;
-    this.retry_backoff = 1.7;
+    this.retry_delay = 150;
+    this.retry_backoff = 1.3;
     this.attempts = 1;
 };
 
@@ -441,11 +454,32 @@ RedisClient.prototype.ready_check = function () {
     this.send_anyway = false;
 };
 
+RedisClient.prototype.return_offline_failure = function () {
+    var command_obj = this.offline_queue.shift();
+    var err = new Error('Command could not be processed. Offline command timeout exceeded.');
+
+    debug('Rejecting offline command by exceeding maximum timeout: ' + command_obj.command);
+    if (command_obj.timeout) {
+        clearTimeout(command_obj.timeout);
+        command_obj.timeout = undefined;
+    }
+    err.command = command_obj.command.toUpperCase();
+    if (command_obj.callback) {
+        command_obj.callback(err);
+    } else {
+        this.emit('error', err);
+    }
+};
+
 RedisClient.prototype.send_offline_queue = function () {
     var command_obj, buffered_writes = 0;
 
     while (command_obj = this.offline_queue.shift()) {
         debug('Sending offline command: ' + command_obj.command);
+        if (command_obj.timeout) {
+            clearTimeout(command_obj.timeout);
+            command_obj.timeout = undefined;
+        }
         buffered_writes += !this.send_command(command_obj.command, command_obj.args, command_obj.callback);
     }
     // Even though items were shifted off, Queue backing store still uses memory until next add, so just get a new Queue
@@ -711,10 +745,16 @@ RedisClient.prototype.send_command = function (command, args, callback) {
     command_obj = new Command(command, args, false, buffer, callback);
 
     if (!this.ready && !this.send_anyway || !stream.writable) {
-        if (this.closing || !this.enable_offline_queue) {
+        // TODO: Remove the swallow_unresolvable in v.3.0
+        // This option is only here so some libraries might have a chance to update to a newer version and fix there issues with swallowing commands
+        // This should not be documented and only mentioned in pull requests against the most popular libraries that have such an issue
+        if (this.closing && !this.options.swallow_unresolvable || this.enable_offline_queue === -1) {
             command = command.toUpperCase();
             if (!this.closing) {
-                err = new Error(command + " can't be processed. Stream not writeable and enable_offline_queue is deactivated.");
+                var msg = this.enable_offline_queue !== -1 ?
+                    'Stream not writeable.' :
+                    'The connection is not yet established and the offline queue is deactivated.';
+                err = new Error(command + " can't be processed. " + msg);
             } else {
                 err = new Error(command + " can't be processed. The connection has already been closed.");
             }
@@ -726,6 +766,11 @@ RedisClient.prototype.send_command = function (command, args, callback) {
             }
         } else {
             debug('Queueing ' + command + ' for next server connection.');
+            if (this.enable_offline_queue !== 0) {
+                command_obj.timeout = setTimeout(function (self) {
+                    self.return_offline_failure();
+                }, this.enable_offline_queue, this);
+            }
             this.offline_queue.push(command_obj);
             this.should_buffer = true;
         }
@@ -739,14 +784,8 @@ RedisClient.prototype.send_command = function (command, args, callback) {
         this.monitoring = true;
     } else if (command === 'quit') {
         this.closing = true;
-    } else if (this.pub_sub_mode === true) {
-        err = new Error('Connection in subscriber mode, only subscriber commands may be used');
-        err.command = command.toUpperCase();
-        this.emit('error', err);
-        return true;
     }
     this.command_queue.push(command_obj);
-    this.commands_sent += 1;
 
     if (typeof this.options.rename_commands !== 'undefined' && this.options.rename_commands[command]) {
         command = this.options.rename_commands[command];
@@ -864,7 +903,7 @@ RedisClient.prototype.end = function (flush) {
         clearTimeout(this.retry_timer);
         this.retry_timer = null;
     }
-    this.stream.on('error', function noop(){});
+    this.stream.on('error', noop);
 
     // Flush queue if wanted
     if (flush) {
@@ -882,9 +921,9 @@ function Multi(client, args) {
     this.queue = new Queue();
     var command, tmp_args;
     if (Array.isArray(args)) {
-        while (tmp_args = args.shift()) {
-            command = tmp_args[0];
-            tmp_args = tmp_args.slice(1);
+        for (var i = 0; i < args.length; i++) {
+            command = args[i][0];
+            tmp_args = args[i].slice(1);
             if (Array.isArray(command)) {
                 this[command[0]].apply(this, command.slice(1).concat(tmp_args));
             } else {
@@ -1121,14 +1160,13 @@ Multi.prototype.execute_callback = function (err, replies) {
     var i = 0, args;
 
     if (err) {
-        if (err.code !== 'CONNECTION_BROKEN') {
-            err.errors = this.errors;
-            if (this.callback) {
-                this.callback(err);
-            } else {
-                // Exclude CONNECTION_BROKEN so that error won't be emitted twice
-                this._client.emit('error', err);
-            }
+        // The errors would be circular
+        err.errors = err.code !== 'CONNECTION_BROKEN' ? this.errors : [];
+        if (this.callback) {
+            this.callback(err);
+        } else if (err.code !== 'CONNECTION_BROKEN') {
+            // Exclude CONNECTION_BROKEN so that error won't be emitted twice
+            this._client.emit('error', err);
         }
         return;
     }
@@ -1169,7 +1207,7 @@ Multi.prototype.execute_callback = function (err, replies) {
     }
 };
 
-Multi.prototype.callback = function (cb, command, i) {
+Multi.prototype.callback = function (cb, i) {
     var self = this;
     return function (err, res) {
         if (err) {
@@ -1210,9 +1248,9 @@ Multi.prototype.exec = Multi.prototype.EXEC = Multi.prototype.exec_batch = funct
         var command = args.shift();
         var cb;
         if (typeof args[args.length - 1] === 'function') {
-            cb = this.callback(args.pop(), command, index);
+            cb = this.callback(args.pop(), index);
         } else {
-            cb = this.callback(undefined, command, index);
+            cb = this.callback(undefined, index);
         }
         if (callback && index === len - 1) {
             cb = lastCallback(cb);
