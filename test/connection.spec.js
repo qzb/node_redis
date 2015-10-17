@@ -10,13 +10,23 @@ describe("connection tests", function () {
 
         describe("using " + parser + " and " + ip, function () {
 
+            var client;
+
+            afterEach(function () {
+                if (client) {
+                    client.end();
+                }
+            });
+
             describe("on lost connection", function () {
                 it("emit an error after max retry attempts and do not try to reconnect afterwards", function (done) {
                     var max_attempts = 4;
-                    var client = redis.createClient({
+                    var options = {
                         parser: parser,
                         max_attempts: max_attempts
-                    });
+                    };
+                    client = redis.createClient(options);
+                    assert.strictEqual(Object.keys(options).length, 2);
                     var calls = 0;
 
                     client.once('ready', function() {
@@ -39,7 +49,7 @@ describe("connection tests", function () {
 
                 it("emit an error after max retry timeout and do not try to reconnect afterwards", function (done) {
                     var connect_timeout = 500; // in ms
-                    var client = redis.createClient({
+                    client = redis.createClient({
                         parser: parser,
                         connect_timeout: connect_timeout
                     });
@@ -65,7 +75,7 @@ describe("connection tests", function () {
 
                 it("end connection while retry is still ongoing", function (done) {
                     var connect_timeout = 1000; // in ms
-                    var client = redis.createClient({
+                    client = redis.createClient({
                         parser: parser,
                         connect_timeout: connect_timeout
                     });
@@ -81,11 +91,13 @@ describe("connection tests", function () {
                 });
 
                 it("can not connect with wrong host / port in the options object", function (done) {
-                    var client = redis.createClient({
+                    var options = {
                         host: 'somewhere',
                         port: 6379,
                         max_attempts: 1
-                    });
+                    };
+                    client = redis.createClient(options);
+                    assert.strictEqual(Object.keys(options).length, 3);
                     var end = helper.callFuncAfter(done, 2);
 
                     client.on('error', function (err) {
@@ -97,13 +109,6 @@ describe("connection tests", function () {
             });
 
             describe("when not connected", function () {
-                var client;
-
-                afterEach(function () {
-                    if (client) {
-                        client.end();
-                    }
-                });
 
                 it("connect with host and port provided in the options object", function (done) {
                     client = redis.createClient({
@@ -221,9 +226,11 @@ describe("connection tests", function () {
                     });
 
                     it('allows connecting with the redis url and no auth and options as second parameter', function (done) {
-                        client = redis.createClient('redis://' + config.HOST[ip] + ':' + config.PORT, {
+                        var options = {
                             detect_buffers: false
-                        });
+                        };
+                        client = redis.createClient('redis://' + config.HOST[ip] + ':' + config.PORT, options);
+                        assert.strictEqual(Object.keys(options).length, 1);
                         client.on("ready", function () {
                             return done();
                         });
