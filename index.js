@@ -35,7 +35,8 @@ try {
 parsers.push(require('./lib/parsers/javascript'));
 
 function RedisClient(stream, options) {
-    options = options || {};
+    // Copy the options so they are not mutated
+    options = JSON.parse(JSON.stringify(options));
     var self = this;
 
     if (!stream.cork) {
@@ -63,10 +64,8 @@ function RedisClient(stream, options) {
         options.socket_keepalive = true;
     }
     if (options.rename_commands) {
-        for (var command in options.rename_commands) {
-            if (options.rename_commands.hasOwnProperty(command)) {
-                options.rename_commands[command.toLowerCase()] = options.rename_commands[command];
-            }
+        for (var command in options.rename_commands) { // jshint ignore: line
+            options.rename_commands[command.toLowerCase()] = options.rename_commands[command];
         }
     }
     options.return_buffers = !!options.return_buffers;
@@ -77,9 +76,9 @@ function RedisClient(stream, options) {
         options.detect_buffers = false;
     }
     this.should_buffer = false;
-    this.command_queue_high_water = options.command_queue_high_water || 1000;
-    this.command_queue_low_water = options.command_queue_low_water || 0;
-    this.max_attempts = +options.max_attempts || 0;
+    this.command_queue_high_water = +options.command_queue_high_water || 1000;
+    this.command_queue_low_water = options.command_queue_low_water | 0;
+    this.max_attempts = options.max_attempts | 0;
     this.command_queue = new Queue(); // Holds sent commands to de-pipeline them
     this.offline_queue = new Queue(); // Holds commands issued but not able to be sent
     this.retry_max_delay = +options.retry_max_delay || null;
@@ -140,8 +139,7 @@ RedisClient.prototype.install_stream_listeners = function() {
     });
 
     this.stream.on('drain', function () {
-        self.should_buffer = false;
-        self.emit('drain');
+        self.drain();
     });
 };
 
@@ -459,16 +457,10 @@ RedisClient.prototype.return_offline_failure = function () {
     var err = new Error('Command could not be processed. Offline command timeout exceeded.');
 
     debug('Rejecting offline command by exceeding maximum timeout: ' + command_obj.command);
-    if (command_obj.timeout) {
-        clearTimeout(command_obj.timeout);
-        command_obj.timeout = undefined;
-    }
+    clearTimeout(command_obj.timeout);
+    command_obj.timeout = undefined;
     err.command = command_obj.command.toUpperCase();
-    if (command_obj.callback) {
-        command_obj.callback(err);
-    } else {
-        this.emit('error', err);
-    }
+    this.callback_emit_error(command_obj.callback, err);
 };
 
 RedisClient.prototype.send_offline_queue = function () {
@@ -484,11 +476,6 @@ RedisClient.prototype.send_offline_queue = function () {
     }
     // Even though items were shifted off, Queue backing store still uses memory until next add, so just get a new Queue
     this.offline_queue = new Queue();
-
-    if (buffered_writes === 0) {
-        this.should_buffer = false;
-        this.emit('drain');
-    }
 };
 
 var retry_connection = function (self) {
@@ -592,6 +579,11 @@ RedisClient.prototype.return_error = function (err) {
     }
 };
 
+RedisClient.prototype.drain = function () {
+    this.emit('drain');
+    this.should_buffer = false;
+};
+
 RedisClient.prototype.emit_drain_idle = function (queue_len) {
     if (this.pub_sub_mode === false && queue_len === 0) {
         // Free the queue capacity memory by using a new queue
@@ -600,8 +592,7 @@ RedisClient.prototype.emit_drain_idle = function (queue_len) {
     }
 
     if (this.should_buffer && queue_len <= this.command_queue_low_water) {
-        this.emit('drain');
-        this.should_buffer = false;
+        this.drain();
     }
 };
 
@@ -722,11 +713,7 @@ RedisClient.prototype.send_command = function (command, args, callback) {
             command = command.toUpperCase();
             err = new Error('send_command: ' + command + ' value must not be undefined or null');
             err.command = command;
-            if (callback) {
-                callback(err);
-            } else {
-                this.emit('error', err);
-            }
+            this.callback_emit_error(callback, err);
             // Singal no buffering
             return true;
         }
@@ -751,7 +738,7 @@ RedisClient.prototype.send_command = function (command, args, callback) {
         if (this.closing && !this.options.swallow_unresolvable || this.enable_offline_queue === -1) {
             command = command.toUpperCase();
             if (!this.closing) {
-                var msg = this.enable_offline_queue !== -1 ?
+                var msg = !stream.writable ?
                     'Stream not writeable.' :
                     'The connection is not yet established and the offline queue is deactivated.';
                 err = new Error(command + " can't be processed. " + msg);
@@ -759,11 +746,7 @@ RedisClient.prototype.send_command = function (command, args, callback) {
                 err = new Error(command + " can't be processed. The connection has already been closed.");
             }
             err.command = command;
-            if (callback) {
-                callback(err);
-            } else {
-                this.emit('error', err);
-            }
+            this.callback_emit_error(callback, err);
         } else {
             debug('Queueing ' + command + ' for next server connection.');
             if (this.enable_offline_queue !== 0) {
@@ -1011,18 +994,22 @@ RedisClient.prototype.select = RedisClient.prototype.SELECT = function (db, call
     });
 };
 
+RedisClient.prototype.callback_emit_error = function (callback, err) {
+    if (callback) {
+        setImmediate(function () {
+            callback(err);
+        });
+    } else {
+        this.emit('error', err);
+    }
+};
+
 // Stash auth for connect and reconnect. Send immediately if already connected.
 RedisClient.prototype.auth = RedisClient.prototype.AUTH = function (pass, callback) {
     if (typeof pass !== 'string') {
         var err = new Error('The password has to be of type "string"');
         err.command = 'AUTH';
-        if (callback) {
-            setImmediate(function () {
-                callback(err);
-            });
-        } else {
-            this.emit('error', err);
-        }
+        this.callback_emit_error(callback, err);
         return true;
     }
     this.auth_pass = pass;
@@ -1279,7 +1266,7 @@ var createClient_tcp = function (port_arg, host_arg, options) {
     var cnxOptions = {
         port : port_arg || default_port,
         host : host_arg || default_host,
-        family : options && options.family === 'IPv6' ? 6 : 4
+        family : options.family === 'IPv6' ? 6 : 4
     };
     var net_client = net.createConnection(cnxOptions);
     var redis_client = new RedisClient(net_client, options);
@@ -1296,10 +1283,10 @@ var createClient = function (port_arg, host_arg, options) {
         return createClient_tcp(+options.port, options.host, options);
     }
     if (typeof port_arg === 'number' || typeof port_arg === 'string' && /^\d+$/.test(port_arg)) {
-        return createClient_tcp(port_arg, host_arg, options);
+        return createClient_tcp(port_arg, host_arg, options || {});
     }
     if (typeof port_arg === 'string') {
-        options = host_arg || {};
+        options = host_arg || options || {};
 
         var parsed = URL.parse(port_arg, true, true);
         if (parsed.hostname) {

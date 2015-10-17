@@ -602,12 +602,12 @@ some kind of maximum queue depth for pre-connection commands.
 
 ## client.retry_delay
 
-Current delay in milliseconds before a connection retry will be attempted. This starts at `100`.
+Current delay in milliseconds before a connection retry will be attempted. This starts at `150`.
 
 ## client.retry_backoff
 
 Multiplier for future retry timeouts. This should be larger than 1 to add more time between retries.
-Defaults to 1.3. The default initial connection retry is 100, so the second retry will be 130, followed by 169, etc.
+Defaults to 1.3. The default initial connection retry is 150, so the second retry will be 195, followed by 236, etc.
 
 ### Commands with Optional and Keyword arguments
 

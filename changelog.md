@@ -16,8 +16,9 @@ Bugfixes
 
 -  Fixed unspecific error message for unresolvable commands ([@BridgeAR](https://github.com/BridgeAR))
 -  Fixed command not allowed in pubsub mode not being returned in a provided callback ([@BridgeAR](https://github.com/BridgeAR))
--  Fixed mutation of the arguments array passed to .multi / .batch constructor ([@BridgeAR](https://github.com/BridgeAR))
 -  Fixed to many commands forbidden in pub sub mode ([@BridgeAR](https://github.com/BridgeAR))
+-  Fixed mutation of the arguments array passed to .multi / .batch constructor ([@BridgeAR](https://github.com/BridgeAR))
+-  Fixed mutation of the options object passed to createClient. This could have happened in some cases. ([@BridgeAR](https://github.com/BridgeAR))
 -  Fixed error callback in .multi not called if connection in broken mode ([@BridgeAR](https://github.com/BridgeAR))
 
 ## v.2.2.3 - 14 Oct, 2015
